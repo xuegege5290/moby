@@ -35,7 +35,8 @@ func NewRenameCommand(dockerCli *command.DockerCli) *cobra.Command {
 
 func runRename(dockerCli *command.DockerCli, opts *renameOptions) error {
 	ctx := context.Background()
-
+//使用 strings.TrimSpace (s) 来剔除字符串开头和结尾的空白符号；
+//如果你想要剔除指定字符，则可以使用 strings.Trim (s, "cut") 来将开头和结尾的 cut 去除掉。
 	oldName := strings.TrimSpace(opts.oldName)
 	newName := strings.TrimSpace(opts.newName)
 
