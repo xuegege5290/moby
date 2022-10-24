@@ -16,6 +16,7 @@ type waitOptions struct {
 }
 
 // NewWaitCommand creates a new cobra.Command for `docker wait`
+//创建一个新的cobra.Command子命令，为dockerwait
 func NewWaitCommand(dockerCli *command.DockerCli) *cobra.Command {
 	var opts waitOptions
 
