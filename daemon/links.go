@@ -50,6 +50,7 @@ func (l *linkIndex) unlink(alias string, child, parent *container.Container) {
 	l.mu.Unlock()
 }
 
+//--link <name or id>:alias
 // children maps all the aliases-> children for the passed in parent
 // aliases here are the aliases the parent uses to refer to the child
 func (l *linkIndex) children(parent *container.Container) map[string]*container.Container {

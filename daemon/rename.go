@@ -32,6 +32,8 @@ func (daemon *Daemon) ContainerRename(oldName, newName string) error {
 	}
 
 	oldName = container.Name
+	//Endpoint 可以理解为虚拟网卡，是成对存在的；
+	//一端连接在容器内部的网络沙盒，一端连接docker 服务的网络驱动模式(可以理解为虚拟交换机)。
 	oldIsAnonymousEndpoint := container.NetworkSettings.IsAnonymousEndpoint
 
 	if oldName == newName {
@@ -40,7 +42,7 @@ func (daemon *Daemon) ContainerRename(oldName, newName string) error {
 
 	container.Lock()
 	defer container.Unlock()
-
+	//https://docs.docker.com/network/links/
 	links := map[string]*dockercontainer.Container{}
 	for k, v := range daemon.linkIndex.children(container) {
 		if !strings.HasPrefix(k, oldName) {
