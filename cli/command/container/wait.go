@@ -19,7 +19,8 @@ type waitOptions struct {
 //创建一个新的cobra.Command子命令，为dockerwait
 func NewWaitCommand(dockerCli *command.DockerCli) *cobra.Command {
 	var opts waitOptions
-
+	//opt字符串数组，用于存放容器名字/容器id
+	
 	cmd := &cobra.Command{
 		Use:   "wait CONTAINER [CONTAINER...]",
 		Short: "Block until one or more containers stop, then print their exit codes",

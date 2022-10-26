@@ -6,6 +6,7 @@ import (
 	"github.com/docker/docker/container"
 )
 
+
 // linkIndex stores link relationships between containers, including their specified alias
 // The alias is the name the parent uses to reference the child
 type linkIndex struct {
@@ -50,7 +51,11 @@ func (l *linkIndex) unlink(alias string, child, parent *container.Container) {
 	l.mu.Unlock()
 }
 
+<<<<<<< HEAD
+//Children 映射父别名中传递的所有别名-> 子别名，这里是父别名用来引用子别名的别名
+=======
 //--link <name or id>:alias
+>>>>>>> af3458a9313e4b61c847547e0ceb249ad237e79c
 // children maps all the aliases-> children for the passed in parent
 // aliases here are the aliases the parent uses to refer to the child
 func (l *linkIndex) children(parent *container.Container) map[string]*container.Container {
