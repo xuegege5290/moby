@@ -6,7 +6,8 @@ import (
 	"github.com/docker/docker/container"
 )
 
-
+//linkIndex存储容器之间的链接关系，包括他们指定的别名。
+//别名(alias)是父级用来引用子级的名称。
 // linkIndex stores link relationships between containers, including their specified alias
 // The alias is the name the parent uses to reference the child
 type linkIndex struct {
