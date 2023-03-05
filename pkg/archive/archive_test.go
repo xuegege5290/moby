@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -791,7 +792,7 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		expectedGID int
 	}{
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1337, GID: 42}}, 1337, 42},
-		{&TarOptions{ChownOpts: &idtools.Identity{UID: 100001, GID: 100001}, UIDMaps: idMaps, GIDMaps: idMaps}, 100001, 100001},
+		{&TarOptions{ChownOpts: &idtools.Identity{UID: 100001, GID: 100001}, IDMap: idtools.IdentityMapping{UIDMaps: idMaps, GIDMaps: idMaps}}, 100001, 100001},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 0, GID: 0}, NoLchown: false}, 0, 0},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1, GID: 1}, NoLchown: true}, 1, 1},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1000, GID: 1000}, NoLchown: true}, 1000, 1000},
@@ -1216,7 +1217,7 @@ func TestTempArchiveCloseMultipleTimes(t *testing.T) {
 	}
 }
 
-// TestXGlobalNoParent is a regression test to check parent directories are not crated for PAX headers
+// TestXGlobalNoParent is a regression test to check parent directories are not created for PAX headers
 func TestXGlobalNoParent(t *testing.T) {
 	buf := &bytes.Buffer{}
 	w := tar.NewWriter(buf)
@@ -1234,6 +1235,53 @@ func TestXGlobalNoParent(t *testing.T) {
 	_, err = os.Lstat(filepath.Join(tmpDir, "foo"))
 	assert.Check(t, err != nil)
 	assert.Check(t, errors.Is(err, os.ErrNotExist))
+}
+
+// TestImpliedDirectoryPermissions ensures that directories implied by paths in the tar file, but without their own
+// header entries are created recursively with the default mode (permissions) stored in ImpliedDirectoryMode. This test
+// also verifies that the permissions of explicit directories are respected.
+func TestImpliedDirectoryPermissions(t *testing.T) {
+	skip.If(t, runtime.GOOS == "windows", "skipping test that requires Unix permissions")
+
+	buf := &bytes.Buffer{}
+	headers := []tar.Header{{
+		Name: "deeply/nested/and/implied",
+	}, {
+		Name: "explicit/",
+		Mode: 0644,
+	}, {
+		Name: "explicit/permissions/",
+		Mode: 0600,
+	}, {
+		Name: "explicit/permissions/specified",
+		Mode: 0400,
+	}}
+
+	w := tar.NewWriter(buf)
+	for _, header := range headers {
+		err := w.WriteHeader(&header)
+		assert.NilError(t, err)
+	}
+
+	tmpDir := t.TempDir()
+
+	err := Untar(buf, tmpDir, nil)
+	assert.NilError(t, err)
+
+	assertMode := func(path string, expected uint32) {
+		t.Helper()
+		stat, err := os.Lstat(filepath.Join(tmpDir, path))
+		assert.Check(t, err)
+		assert.Check(t, is.Equal(stat.Mode().Perm(), fs.FileMode(expected)))
+	}
+
+	assertMode("deeply", ImpliedDirectoryMode)
+	assertMode("deeply/nested", ImpliedDirectoryMode)
+	assertMode("deeply/nested/and", ImpliedDirectoryMode)
+
+	assertMode("explicit", 0644)
+	assertMode("explicit/permissions", 0600)
+	assertMode("explicit/permissions/specified", 0400)
 }
 
 func TestReplaceFileTarWrapper(t *testing.T) {
@@ -1372,8 +1420,7 @@ func TestDisablePigz(t *testing.T) {
 		t.Log("Test will not check full path when Pigz not installed")
 	}
 
-	os.Setenv("MOBY_DISABLE_PIGZ", "true")
-	defer os.Unsetenv("MOBY_DISABLE_PIGZ")
+	t.Setenv("MOBY_DISABLE_PIGZ", "true")
 
 	r := testDecompressStream(t, "gz", "gzip -f")
 	// For the bufio pool
@@ -1401,4 +1448,13 @@ func TestPigz(t *testing.T) {
 		t.Log("Tested whether Pigz is not used, as it not installed")
 		assert.Equal(t, reflect.TypeOf(contextReaderCloserWrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
 	}
+}
+
+func TestNosysFileInfo(t *testing.T) {
+	st, err := os.Stat("archive_test.go")
+	assert.NilError(t, err)
+	h, err := tar.FileInfoHeader(nosysFileInfo{st}, "")
+	assert.NilError(t, err)
+	assert.Check(t, h.Uname == "")
+	assert.Check(t, h.Gname == "")
 }

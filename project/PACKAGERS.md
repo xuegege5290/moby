@@ -32,7 +32,7 @@ build, so the source of truth for the current version of each dependency is
 whatever is in "./vendor".
 
 If you would rather (or must, due to distro policy) package these dependencies
-yourself, take a look at "vendor.conf" for an easy-to-parse list of the
+yourself, take a look at "vendor.mod" for an easy-to-parse list of the
 exact version for each.
 
 ## Stripping Binaries
@@ -81,14 +81,8 @@ Please use our build script ("./hack/make.sh") for compilation.
 
 ### `DOCKER_BUILDTAGS`
 
-If you're building a binary that might be used on platforms that include
-seccomp, you will need to use the `seccomp` build tag:
-```bash
-export DOCKER_BUILDTAGS='seccomp'
-```
-
-There are build tags for disabling graphdrivers as well. By default, support
-for all graphdrivers are built in.
+There are build tags for disabling graphdrivers, if necessary. By default,
+support for all graphdrivers are built in.
 
 To disable btrfs:
 ```bash
@@ -107,7 +101,7 @@ export DOCKER_BUILDTAGS='exclude_graphdriver_aufs'
 
 NOTE: if you need to set more than one build tag, space separate them:
 ```bash
-export DOCKER_BUILDTAGS='apparmor exclude_graphdriver_aufs'
+export DOCKER_BUILDTAGS='exclude_graphdriver_aufs exclude_graphdriver_btrfs'
 ```
 
 ## System Dependencies
@@ -145,7 +139,7 @@ by having support for them in the kernel or userspace. A few examples include:
 
 * AUFS graph driver (requires AUFS patches/support enabled in the kernel, and at
   least the "auplink" utility from aufs-tools)
-* BTRFS graph driver (requires BTRFS support enabled in the kernel)
+* BTRFS graph driver (requires suitable kernel headers: `linux/btrfs.h` and `linux/btrfs_tree.h`, present in 4.12+; and BTRFS support enabled in the kernel)
 * ZFS graph driver (requires userspace zfs-utils and a corresponding kernel module)
 * Libseccomp to allow running seccomp profiles with containers
 

@@ -3,22 +3,28 @@ package config // import "github.com/docker/docker/daemon/config"
 import (
 	"fmt"
 	"net"
+	"os/exec"
+	"path/filepath"
 
+	"github.com/containerd/cgroups"
 	"github.com/docker/docker/api/types"
-	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/opts"
+	"github.com/docker/docker/pkg/homedir"
+	"github.com/docker/docker/pkg/rootless"
 	units "github.com/docker/go-units"
+	"github.com/pkg/errors"
 )
 
 const (
 	// DefaultIpcMode is default for container's IpcMode, if not set otherwise
-	DefaultIpcMode = containertypes.IPCModePrivate
+	DefaultIpcMode = container.IPCModePrivate
 
 	// DefaultCgroupNamespaceMode is the default mode for containers cgroup namespace when using cgroups v2.
-	DefaultCgroupNamespaceMode = containertypes.CgroupnsModePrivate
+	DefaultCgroupNamespaceMode = container.CgroupnsModePrivate
 
 	// DefaultCgroupV1NamespaceMode is the default mode for containers cgroup namespace when using cgroups v1.
-	DefaultCgroupV1NamespaceMode = containertypes.CgroupnsModeHost
+	DefaultCgroupV1NamespaceMode = container.CgroupnsModeHost
 
 	// StockRuntimeName is the reserved name/alias used to represent the
 	// OCI runtime being shipped with the docker daemon package.
@@ -120,9 +126,6 @@ func (conf *Config) GetResolvConf() string {
 
 // IsSwarmCompatible defines if swarm mode can be enabled in this config
 func (conf *Config) IsSwarmCompatible() error {
-	if conf.ClusterStore != "" || conf.ClusterAdvertise != "" {
-		return fmt.Errorf("--cluster-store and --cluster-advertise daemon configurations are incompatible with swarm mode")
-	}
 	if conf.LiveRestoreEnabled {
 		return fmt.Errorf("--live-restore daemon configuration is incompatible with swarm mode")
 	}
@@ -132,7 +135,7 @@ func (conf *Config) IsSwarmCompatible() error {
 func verifyDefaultIpcMode(mode string) error {
 	const hint = `use "shareable" or "private"`
 
-	dm := containertypes.IpcMode(mode)
+	dm := container.IpcMode(mode)
 	if !dm.Valid() {
 		return fmt.Errorf("default IPC mode setting (%v) is invalid; "+hint, dm)
 	}
@@ -143,7 +146,7 @@ func verifyDefaultIpcMode(mode string) error {
 }
 
 func verifyDefaultCgroupNsMode(mode string) error {
-	cm := containertypes.CgroupnsMode(mode)
+	cm := container.CgroupnsMode(mode)
 	if !cm.Valid() {
 		return fmt.Errorf(`default cgroup namespace mode (%v) is invalid; use "host" or "private"`, cm)
 	}
@@ -163,4 +166,48 @@ func (conf *Config) ValidatePlatformConfig() error {
 // IsRootless returns conf.Rootless on Linux but false on Windows
 func (conf *Config) IsRootless() bool {
 	return conf.Rootless
+}
+
+func setPlatformDefaults(cfg *Config) error {
+	cfg.Ulimits = make(map[string]*units.Ulimit)
+	cfg.ShmSize = opts.MemBytes(DefaultShmSize)
+	cfg.SeccompProfile = SeccompProfileDefault
+	cfg.IpcMode = string(DefaultIpcMode)
+	cfg.Runtimes = make(map[string]types.Runtime)
+
+	if cgroups.Mode() != cgroups.Unified {
+		cfg.CgroupNamespaceMode = string(DefaultCgroupV1NamespaceMode)
+	} else {
+		cfg.CgroupNamespaceMode = string(DefaultCgroupNamespaceMode)
+	}
+
+	if rootless.RunningWithRootlessKit() {
+		cfg.Rootless = true
+
+		var err error
+		// use rootlesskit-docker-proxy for exposing the ports in RootlessKit netns to the initial namespace.
+		cfg.BridgeConfig.UserlandProxyPath, err = exec.LookPath(rootless.RootlessKitDockerProxyBinary)
+		if err != nil {
+			return errors.Wrapf(err, "running with RootlessKit, but %s not installed", rootless.RootlessKitDockerProxyBinary)
+		}
+
+		dataHome, err := homedir.GetDataHome()
+		if err != nil {
+			return err
+		}
+		runtimeDir, err := homedir.GetRuntimeDir()
+		if err != nil {
+			return err
+		}
+
+		cfg.Root = filepath.Join(dataHome, "docker")
+		cfg.ExecRoot = filepath.Join(runtimeDir, "docker")
+		cfg.Pidfile = filepath.Join(runtimeDir, "docker.pid")
+	} else {
+		cfg.Root = "/var/lib/docker"
+		cfg.ExecRoot = "/var/run/docker"
+		cfg.Pidfile = "/var/run/docker.pid"
+	}
+
+	return nil
 }

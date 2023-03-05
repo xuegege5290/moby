@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/integration-cli/daemon"
 	"github.com/docker/docker/pkg/stringid"
 	testdaemon "github.com/docker/docker/testutil/daemon"
@@ -505,8 +506,7 @@ func (s *DockerExternalVolumeSuite) TestExternalVolumeDriverGetEmptyResponse(c *
 
 // Ensure only cached paths are used in volume list to prevent N+1 calls to `VolumeDriver.Path`
 //
-// TODO(@cpuguy83): This test is testing internal implementation. In all the cases here, there may not even be a path
-// 	available because the volume is not even mounted. Consider removing this test.
+// TODO(@cpuguy83): This test is testing internal implementation. In all the cases here, there may not even be a path available because the volume is not even mounted. Consider removing this test.
 func (s *DockerExternalVolumeSuite) TestExternalVolumeDriverPathCalls(c *testing.T) {
 	s.d.Start(c)
 	assert.Equal(c, s.ec.paths, 0)
@@ -565,7 +565,7 @@ func (s *DockerExternalVolumeSuite) TestExternalVolumeDriverOutOfBandDelete(c *t
 	out, err = s.d.Cmd("volume", "inspect", "test")
 	assert.NilError(c, err, out)
 
-	var vs []types.Volume
+	var vs []volumetypes.Volume
 	err = json.Unmarshal([]byte(out), &vs)
 	assert.NilError(c, err)
 	assert.Equal(c, len(vs), 1)

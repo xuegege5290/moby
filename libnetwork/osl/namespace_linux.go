@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -14,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/internal/unshare"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/osl/kernel"
 	"github.com/docker/docker/libnetwork/types"
-	"github.com/docker/docker/pkg/reexec"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -27,28 +26,23 @@ import (
 const defaultPrefix = "/var/run/docker"
 
 func init() {
-	reexec.Register("set-ipv6", reexecSetIPv6)
+	// Lock main() to the initial thread to exclude the goroutines spawned
+	// by func (*networkNamespace) InvokeFunc() or func setIPv6() below from
+	// being scheduled onto that thread. Changes to the network namespace of
+	// the initial thread alter /proc/self/ns/net, which would break any
+	// code which (incorrectly) assumes that that file is the network
+	// namespace for the thread it is currently executing on.
+	runtime.LockOSThread()
 }
 
 var (
-	once               sync.Once
-	garbagePathMap     = make(map[string]bool)
-	gpmLock            sync.Mutex
-	gpmWg              sync.WaitGroup
-	gpmCleanupPeriod   = 60 * time.Second
-	gpmChan            = make(chan chan struct{})
-	prefix             = defaultPrefix
-	loadBalancerConfig = map[string]*kernel.OSValue{
-		// disables any special handling on port reuse of existing IPVS connection table entries
-		// more info: https://github.com/torvalds/linux/blob/master/Documentation/networking/ipvs-sysctl.txt#L25:1
-		"net.ipv4.vs.conn_reuse_mode": {Value: "0", CheckFn: nil},
-		// expires connection from the IPVS connection table when the backend is not available
-		// more info: https://github.com/torvalds/linux/blob/master/Documentation/networking/ipvs-sysctl.txt#L126:1
-		"net.ipv4.vs.expire_nodest_conn": {Value: "1", CheckFn: nil},
-		// expires persistent connections to destination servers with weights set to 0
-		// more info: https://github.com/torvalds/linux/blob/master/Documentation/networking/ipvs-sysctl.txt#L144:1
-		"net.ipv4.vs.expire_quiescent_template": {Value: "1", CheckFn: nil},
-	}
+	once             sync.Once
+	garbagePathMap   = make(map[string]bool)
+	gpmLock          sync.Mutex
+	gpmWg            sync.WaitGroup
+	gpmCleanupPeriod = 60 * time.Second
+	gpmChan          = make(chan chan struct{})
+	prefix           = defaultPrefix
 )
 
 // The networkNamespace type is the linux implementation of the Sandbox
@@ -71,10 +65,6 @@ type networkNamespace struct {
 // SetBasePath sets the base url prefix for the ns path
 func SetBasePath(path string) {
 	prefix = path
-}
-
-func init() {
-	reexec.Register("netns-create", reexecCreateNamespace)
 }
 
 func basePath() string {
@@ -188,7 +178,6 @@ func GenerateKey(containerID string) string {
 					index = tmpindex
 					tmpkey = id
 				}
-
 			}
 		}
 		containerID = tmpkey
@@ -245,7 +234,7 @@ func NewSandbox(key string, osCreate, isRestore bool) (Sandbox, error) {
 	}
 
 	if err = n.loopbackUp(); err != nil {
-		n.nlHandle.Delete()
+		n.nlHandle.Close()
 		return nil, err
 	}
 
@@ -298,20 +287,11 @@ func GetSandboxForExternalKey(basePath string, key string) (Sandbox, error) {
 	}
 
 	if err = n.loopbackUp(); err != nil {
-		n.nlHandle.Delete()
+		n.nlHandle.Close()
 		return nil, err
 	}
 
 	return n, nil
-}
-
-func reexecCreateNamespace() {
-	if len(os.Args) < 2 {
-		logrus.Fatal("no namespace path provided")
-	}
-	if err := mountNetworkNamespace("/proc/self/ns/net", os.Args[1]); err != nil {
-		logrus.Fatal(err)
-	}
 }
 
 func createNetworkNamespace(path string, osCreate bool) error {
@@ -319,21 +299,13 @@ func createNetworkNamespace(path string, osCreate bool) error {
 		return err
 	}
 
-	cmd := &exec.Cmd{
-		Path:   reexec.Self(),
-		Args:   append([]string{"netns-create"}, path),
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+	do := func() error {
+		return mountNetworkNamespace(fmt.Sprintf("/proc/self/task/%d/ns/net", unix.Gettid()), path)
 	}
 	if osCreate {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-		cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWNET
+		return unshare.Go(unix.CLONE_NEWNET, do, nil)
 	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("namespace creation reexec command failed: %v", err)
-	}
-
-	return nil
+	return do()
 }
 
 func unmountNamespaceFile(path string) {
@@ -424,43 +396,47 @@ func (n *networkNamespace) DisableARPForVIP(srcName string) (Err error) {
 }
 
 func (n *networkNamespace) InvokeFunc(f func()) error {
-	return nsInvoke(n.nsPath(), func(nsFD int) error { return nil }, func(callerFD int) error {
-		f()
-		return nil
-	})
-}
-
-// InitOSContext initializes OS context while configuring network resources
-func InitOSContext() func() {
-	runtime.LockOSThread()
-	if err := ns.SetNamespace(); err != nil {
-		logrus.Error(err)
-	}
-	return runtime.UnlockOSThread
-}
-
-func nsInvoke(path string, prefunc func(nsFD int) error, postfunc func(callerFD int) error) error {
-	defer InitOSContext()()
-
-	newNs, err := netns.GetFromPath(path)
+	path := n.nsPath()
+	newNS, err := netns.GetFromPath(path)
 	if err != nil {
-		return fmt.Errorf("failed get network namespace %q: %v", path, err)
+		return fmt.Errorf("failed get network namespace %q: %w", path, err)
 	}
-	defer newNs.Close()
+	defer newNS.Close()
 
-	// Invoked before the namespace switch happens but after the namespace file
-	// handle is obtained.
-	if err := prefunc(int(newNs)); err != nil {
-		return fmt.Errorf("failed in prefunc: %v", err)
-	}
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		// InvokeFunc() could have been called from a goroutine with
+		// tampered thread state, e.g. from another InvokeFunc()
+		// callback. The outer goroutine's thread state cannot be
+		// trusted.
+		origNS, err := netns.Get()
+		if err != nil {
+			runtime.UnlockOSThread()
+			done <- fmt.Errorf("failed to get original network namespace: %w", err)
+			return
+		}
+		defer origNS.Close()
 
-	if err = netns.Set(newNs); err != nil {
-		return err
-	}
-	defer ns.SetNamespace()
-
-	// Invoked after the namespace switch.
-	return postfunc(ns.ParseHandlerInt())
+		if err := netns.Set(newNS); err != nil {
+			runtime.UnlockOSThread()
+			done <- err
+			return
+		}
+		defer func() {
+			close(done)
+			if err := netns.Set(origNS); err != nil {
+				logrus.WithError(err).Warn("failed to restore thread's network namespace")
+				// Recover from the error by leaving this goroutine locked to
+				// the thread. The runtime will terminate the thread and replace
+				// it with a clean one when this goroutine returns.
+			} else {
+				runtime.UnlockOSThread()
+			}
+		}()
+		f()
+	}()
+	return <-done
 }
 
 func (n *networkNamespace) nsPath() string {
@@ -480,7 +456,7 @@ func (n *networkNamespace) Key() string {
 
 func (n *networkNamespace) Destroy() error {
 	if n.nlHandle != nil {
-		n.nlHandle.Delete()
+		n.nlHandle.Close()
 	}
 	// Assuming no running process is executing in this network namespace,
 	// unmounting is sufficient to destroy it.
@@ -623,74 +599,83 @@ func (n *networkNamespace) checkLoV6() {
 	n.loV6Enabled = enable
 }
 
-func reexecSetIPv6() {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	if len(os.Args) < 3 {
-		logrus.Errorf("invalid number of arguments for %s", os.Args[0])
-		os.Exit(1)
-	}
-
-	ns, err := netns.GetFromPath(os.Args[1])
+func setIPv6(nspath, iface string, enable bool) error {
+	origns, err := netns.Get()
 	if err != nil {
-		logrus.Errorf("failed get network namespace %q: %v", os.Args[1], err)
-		os.Exit(2)
+		return fmt.Errorf("failed to get current network namespace: %w", err)
+	}
+	defer origns.Close()
+
+	ns, err := netns.GetFromPath(nspath)
+	if err != nil {
+		return fmt.Errorf("failed get network namespace %q: %w", nspath, err)
 	}
 	defer ns.Close()
 
-	if err = netns.Set(ns); err != nil {
-		logrus.Errorf("setting into container netns %q failed: %v", os.Args[1], err)
-		os.Exit(3)
-	}
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(errCh)
 
-	var (
-		action = "disable"
-		value  = byte('1')
-		path   = fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", os.Args[2])
-	)
-
-	if os.Args[3] == "true" {
-		action = "enable"
-		value = byte('0')
-	}
-
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			logrus.Warnf("file does not exist: %s : %v Has IPv6 been disabled in this node's kernel?", path, err)
-			os.Exit(0)
+		runtime.LockOSThread()
+		if err = netns.Set(ns); err != nil {
+			errCh <- fmt.Errorf("setting into container netns %q failed: %w", nspath, err)
+			return
 		}
-		logrus.Errorf("failed to stat %s : %v", path, err)
-		os.Exit(5)
-	}
+		defer func() {
+			if err := netns.Set(origns); err != nil {
+				logrus.WithError(err).Error("libnetwork: restoring thread network namespace failed")
+				// The error is only fatal for the current thread. Keep this
+				// goroutine locked to the thread to make the runtime replace it
+				// with a clean thread once this goroutine returns.
+			} else {
+				runtime.UnlockOSThread()
+			}
+		}()
 
-	if err = os.WriteFile(path, []byte{value, '\n'}, 0644); err != nil {
-		logrus.Errorf("failed to %s IPv6 forwarding for container's interface %s: %v", action, os.Args[2], err)
-		os.Exit(4)
-	}
+		var (
+			action = "disable"
+			value  = byte('1')
+			path   = fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", iface)
+		)
 
-	os.Exit(0)
-}
+		if enable {
+			action = "enable"
+			value = '0'
+		}
 
-func setIPv6(path, iface string, enable bool) error {
-	cmd := &exec.Cmd{
-		Path:   reexec.Self(),
-		Args:   append([]string{"set-ipv6"}, path, iface, strconv.FormatBool(enable)),
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("reexec to set IPv6 failed: %v", err)
-	}
-	return nil
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				logrus.WithError(err).Warn("Cannot configure IPv6 forwarding on container interface. Has IPv6 been disabled in this node's kernel?")
+				return
+			}
+			errCh <- err
+			return
+		}
+
+		if err = os.WriteFile(path, []byte{value, '\n'}, 0o644); err != nil {
+			errCh <- fmt.Errorf("failed to %s IPv6 forwarding for container's interface %s: %w", action, iface, err)
+			return
+		}
+	}()
+	return <-errCh
 }
 
 // ApplyOSTweaks applies linux configs on the sandbox
 func (n *networkNamespace) ApplyOSTweaks(types []SandboxType) {
 	for _, t := range types {
 		switch t {
-		case SandboxTypeLoadBalancer:
-			kernel.ApplyOSTweaks(loadBalancerConfig)
+		case SandboxTypeLoadBalancer, SandboxTypeIngress:
+			kernel.ApplyOSTweaks(map[string]*kernel.OSValue{
+				// disables any special handling on port reuse of existing IPVS connection table entries
+				// more info: https://github.com/torvalds/linux/blame/v5.15/Documentation/networking/ipvs-sysctl.rst#L32
+				"net.ipv4.vs.conn_reuse_mode": {Value: "0", CheckFn: nil},
+				// expires connection from the IPVS connection table when the backend is not available
+				// more info: https://github.com/torvalds/linux/blame/v5.15/Documentation/networking/ipvs-sysctl.rst#L133
+				"net.ipv4.vs.expire_nodest_conn": {Value: "1", CheckFn: nil},
+				// expires persistent connections to destination servers with weights set to 0
+				// more info: https://github.com/torvalds/linux/blame/v5.15/Documentation/networking/ipvs-sysctl.rst#L151
+				"net.ipv4.vs.expire_quiescent_template": {Value: "1", CheckFn: nil},
+			})
 		}
 	}
 }

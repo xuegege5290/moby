@@ -21,7 +21,6 @@ import (
 	"sync"
 
 	"github.com/Microsoft/hcsshim"
-	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/discoverapi"
 	"github.com/docker/docker/libnetwork/driverapi"
@@ -72,12 +71,12 @@ type hnsEndpoint struct {
 	nid       string
 	profileID string
 	Type      string
-	//Note: Currently, the sandboxID is the same as the containerID since windows does
-	//not expose the sandboxID.
-	//In the future, windows will support a proper sandboxID that is different
-	//than the containerID.
-	//Therefore, we are using sandboxID now, so that we won't have to change this code
-	//when windows properly supports a sandboxID.
+	// Note: Currently, the sandboxID is the same as the containerID since windows does
+	// not expose the sandboxID.
+	// In the future, windows will support a proper sandboxID that is different
+	// than the containerID.
+	// Therefore, we are using sandboxID now, so that we won't have to change this code
+	// when windows properly supports a sandboxID.
 	sandboxID      string
 	macAddress     net.HardwareAddr
 	epOption       *endpointOption       // User specified parameters
@@ -128,8 +127,8 @@ func newDriver(networkType string) *driver {
 }
 
 // GetInit returns an initializer for the given network type
-func GetInit(networkType string) func(dc driverapi.DriverCallback, config map[string]interface{}) error {
-	return func(dc driverapi.DriverCallback, config map[string]interface{}) error {
+func GetInit(networkType string) func(dc driverapi.Registerer, config map[string]interface{}) error {
+	return func(dc driverapi.Registerer, config map[string]interface{}) error {
 		if !IsBuiltinLocalDriver(networkType) {
 			return types.BadRequestErrorf("Network type not supported: %s", networkType)
 		}
@@ -218,9 +217,6 @@ func (d *driver) parseNetworkOptions(id string, genericOptions map[string]string
 			}
 			config.VSID = uint(vsid)
 		case EnableOutboundNat:
-			if osversion.Build() <= 16236 {
-				return nil, fmt.Errorf("Invalid network option. OutboundNat is not supported on this OS version")
-			}
 			b, err := strconv.ParseBool(value)
 			if err != nil {
 				return nil, err
@@ -381,8 +377,8 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, nInfo d
 		for i, subnet := range hnsresponse.Subnets {
 			var gwIP, subnetIP *net.IPNet
 
-			//The gateway returned from HNS is an IPAddress.
-			//We need to convert it to an IPNet to use as the Gateway of driverapi.IPAMData struct
+			// The gateway returned from HNS is an IPAddress.
+			// We need to convert it to an IPNet to use as the Gateway of driverapi.IPAMData struct
 			gwCIDR := subnet.GatewayAddress + "/32"
 			_, gwIP, err = net.ParseCIDR(gwCIDR)
 			if err != nil {
@@ -494,10 +490,11 @@ func ConvertPortBindings(portBindings []types.PortBinding) ([]json.RawMessage, e
 		}
 
 		encodedPolicy, err := json.Marshal(hcsshim.NatPolicy{
-			Type:         "NAT",
-			ExternalPort: elem.HostPort,
-			InternalPort: elem.Port,
-			Protocol:     elem.Proto.String(),
+			Type:                 "NAT",
+			ExternalPort:         elem.HostPort,
+			InternalPort:         elem.Port,
+			Protocol:             elem.Proto.String(),
+			ExternalPortReserved: true,
 		})
 
 		if err != nil {
@@ -637,7 +634,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	macAddress := ifInfo.MacAddress()
 	// Use the macaddress if it was provided
 	if macAddress != nil {
-		endpointStruct.MacAddress = strings.Replace(macAddress.String(), ":", "-", -1)
+		endpointStruct.MacAddress = strings.ReplaceAll(macAddress.String(), ":", "-")
 	}
 
 	portMapping := epConnectivity.PortBindings

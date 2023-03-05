@@ -21,7 +21,7 @@ func TestSetupIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nh.Delete()
+	defer nh.Close()
 
 	config, br := setupTestInterface(t, nh)
 	if err := setupBridgeIPv6(config, br); err != nil {
@@ -53,7 +53,6 @@ func TestSetupIPv6(t *testing.T) {
 	if !found {
 		t.Fatalf("Bridge device does not have requested IPv6 address %v", bridgeIPv6)
 	}
-
 }
 
 func TestSetupGatewayIPv6(t *testing.T) {
@@ -71,7 +70,7 @@ func TestSetupGatewayIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nh.Delete()
+	defer nh.Close()
 
 	br := &bridgeInterface{nlh: nh}
 

@@ -71,7 +71,6 @@ func TestEventsExecDie(t *testing.T) {
 	case <-time.After(time.Second * 3):
 		t.Fatal("timeout hit")
 	}
-
 }
 
 // Test case for #18888: Events messages have been switched from generic
@@ -158,7 +157,7 @@ func TestEventsVolumeCreate(t *testing.T) {
 		}
 	}
 
-	_, err := client.VolumeCreate(ctx, volume.VolumeCreateBody{Name: volName})
+	_, err := client.VolumeCreate(ctx, volume.CreateOptions{Name: volName})
 	assert.NilError(t, err)
 
 	filter := filters.NewArgs(

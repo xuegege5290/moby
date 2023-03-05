@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -42,7 +43,6 @@ import (
 	"github.com/docker/docker/pkg/containerfs"
 	"github.com/docker/docker/pkg/directory"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/system"
 	"github.com/moby/locker"
 	"github.com/moby/sys/mount"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -72,8 +72,7 @@ func init() {
 // Driver contains information about the filesystem mounted.
 type Driver struct {
 	root          string
-	uidMaps       []idtools.IDMap
-	gidMaps       []idtools.IDMap
+	idMap         idtools.IdentityMapping
 	ctr           *graphdriver.RefCounter
 	pathCacheLock sync.Mutex
 	pathCache     map[string]string
@@ -84,7 +83,7 @@ type Driver struct {
 
 // Init returns a new AUFS driver.
 // An error is returned if AUFS is not supported.
-func Init(root string, options []string, uidMaps, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
+func Init(root string, options []string, idMap idtools.IdentityMapping) (graphdriver.Driver, error) {
 	// Try to load the aufs kernel module
 	if err := supportsAufs(); err != nil {
 		logger.Error(err)
@@ -122,21 +121,16 @@ func Init(root string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 
 	a := &Driver{
 		root:      root,
-		uidMaps:   uidMaps,
-		gidMaps:   gidMaps,
+		idMap:     idMap,
 		pathCache: make(map[string]string),
 		ctr:       graphdriver.NewRefCounter(graphdriver.NewFsChecker(graphdriver.FsMagicAufs)),
 		locker:    locker.New(),
 	}
 
 	currentID := idtools.CurrentIdentity()
-	_, rootGID, err := idtools.GetRootUIDGID(uidMaps, gidMaps)
-	if err != nil {
-		return nil, err
-	}
 	dirID := idtools.Identity{
 		UID: currentID.UID,
-		GID: rootGID,
+		GID: a.idMap.RootPair().GID,
 	}
 
 	// Create the root aufs driver dir
@@ -164,14 +158,14 @@ func Init(root string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 			}
 			if strings.HasSuffix(entry.Name(), "-removing") {
 				logger.WithField("dir", entry.Name()).Debug("Cleaning up stale layer dir")
-				if err := system.EnsureRemoveAll(filepath.Join(p, entry.Name())); err != nil {
+				if err := containerfs.EnsureRemoveAll(filepath.Join(p, entry.Name())); err != nil {
 					logger.WithField("dir", entry.Name()).WithError(err).Error("Error removing stale layer dir")
 				}
 			}
 		}
 	}
 
-	a.naiveDiff = graphdriver.NewNaiveDiffDriver(a, uidMaps, gidMaps)
+	a.naiveDiff = graphdriver.NewNaiveDiffDriver(a, a.idMap)
 	return a, nil
 }
 
@@ -216,8 +210,8 @@ func (a *Driver) Status() [][2]string {
 	return [][2]string{
 		{"Root Dir", a.rootPath()},
 		{"Backing Filesystem", backingFs},
-		{"Dirs", fmt.Sprintf("%d", len(ids))},
-		{"Dirperm1 Supported", fmt.Sprintf("%v", useDirperm())},
+		{"Dirs", strconv.Itoa(len(ids))},
+		{"Dirperm1 Supported", strconv.FormatBool(useDirperm())},
 	}
 }
 
@@ -244,7 +238,6 @@ func (a *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts
 // Create three folders for each id
 // mnt, layers, and diff
 func (a *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) error {
-
 	if opts != nil && len(opts.StorageOpt) != 0 {
 		return fmt.Errorf("--storage-opt is not supported for aufs")
 	}
@@ -286,15 +279,11 @@ func (a *Driver) createDirsFor(id string) error {
 		"diff",
 	}
 
-	rootUID, rootGID, err := idtools.GetRootUIDGID(a.uidMaps, a.gidMaps)
-	if err != nil {
-		return err
-	}
 	// Directory permission is 0755.
 	// The path of directories are <aufs_root_path>/mnt/<image_id>
 	// and <aufs_root_path>/diff/<image_id>
 	for _, p := range paths {
-		if err := idtools.MkdirAllAndChown(path.Join(a.rootPath(), p, id), 0755, idtools.Identity{UID: rootUID, GID: rootGID}); err != nil {
+		if err := idtools.MkdirAllAndChown(path.Join(a.rootPath(), p, id), 0755, a.idMap.RootPair()); err != nil {
 			return err
 		}
 	}
@@ -357,17 +346,17 @@ func atomicRemove(source string) error {
 		return errors.Wrapf(err, "error preparing atomic delete")
 	}
 
-	return system.EnsureRemoveAll(target)
+	return containerfs.EnsureRemoveAll(target)
 }
 
 // Get returns the rootfs path for the id.
 // This will mount the dir at its given path
-func (a *Driver) Get(id, mountLabel string) (containerfs.ContainerFS, error) {
+func (a *Driver) Get(id, mountLabel string) (string, error) {
 	a.locker.Lock(id)
 	defer a.locker.Unlock(id)
 	parents, err := a.getParentLayerPaths(id)
 	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+		return "", err
 	}
 
 	a.pathCacheLock.Lock()
@@ -381,21 +370,21 @@ func (a *Driver) Get(id, mountLabel string) (containerfs.ContainerFS, error) {
 		}
 	}
 	if count := a.ctr.Increment(m); count > 1 {
-		return containerfs.NewLocalContainerFS(m), nil
+		return m, nil
 	}
 
 	// If a dir does not have a parent ( no layers )do not try to mount
 	// just return the diff path to the data
 	if len(parents) > 0 {
 		if err := a.mount(id, m, mountLabel, parents); err != nil {
-			return nil, err
+			return "", err
 		}
 	}
 
 	a.pathCacheLock.Lock()
 	a.pathCache[id] = m
 	a.pathCacheLock.Unlock()
-	return containerfs.NewLocalContainerFS(m), nil
+	return m, nil
 }
 
 // Put unmounts and updates list of active mounts.
@@ -440,8 +429,7 @@ func (a *Driver) Diff(id, parent string) (io.ReadCloser, error) {
 	return archive.TarWithOptions(path.Join(a.rootPath(), "diff", id), &archive.TarOptions{
 		Compression:     archive.Uncompressed,
 		ExcludePatterns: []string{archive.WhiteoutMetaPrefix + "*", "!" + archive.WhiteoutOpaqueDir},
-		UIDMaps:         a.uidMaps,
-		GIDMaps:         a.gidMaps,
+		IDMap:           a.idMap,
 	})
 }
 
@@ -462,8 +450,7 @@ func (a *Driver) DiffGetter(id string) (graphdriver.FileGetCloser, error) {
 
 func (a *Driver) applyDiff(id string, diff io.Reader) error {
 	return chrootarchive.UntarUncompressed(diff, path.Join(a.rootPath(), "diff", id), &archive.TarOptions{
-		UIDMaps: a.uidMaps,
-		GIDMaps: a.gidMaps,
+		IDMap: a.idMap,
 	})
 }
 

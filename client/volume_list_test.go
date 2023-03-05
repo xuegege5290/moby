@@ -10,9 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
-	volumetypes "github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
 )
 
@@ -21,7 +20,7 @@ func TestVolumeListError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusInternalServerError, "Server error")),
 	}
 
-	_, err := client.VolumeList(context.Background(), filters.NewArgs())
+	_, err := client.VolumeList(context.Background(), volume.ListOptions{})
 	if !errdefs.IsSystem(err) {
 		t.Fatalf("expected a Server Error, got %[1]T: %[1]v", err)
 	}
@@ -70,8 +69,8 @@ func TestVolumeList(t *testing.T) {
 				if actualFilters != listCase.expectedFilters {
 					return nil, fmt.Errorf("filters not set in URL query properly. Expected '%s', got %s", listCase.expectedFilters, actualFilters)
 				}
-				content, err := json.Marshal(volumetypes.VolumeListOKBody{
-					Volumes: []*types.Volume{
+				content, err := json.Marshal(volume.ListResponse{
+					Volumes: []*volume.Volume{
 						{
 							Name:   "volume",
 							Driver: "local",
@@ -88,7 +87,7 @@ func TestVolumeList(t *testing.T) {
 			}),
 		}
 
-		volumeResponse, err := client.VolumeList(context.Background(), listCase.filters)
+		volumeResponse, err := client.VolumeList(context.Background(), volume.ListOptions{Filters: listCase.filters})
 		if err != nil {
 			t.Fatal(err)
 		}
