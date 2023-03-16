@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.20.1
+ARG GO_VERSION=1.20.2
 ARG BASE_DEBIAN_DISTRO="bullseye"
 ARG GOLANG_IMAGE="golang:${GO_VERSION}-${BASE_DEBIAN_DISTRO}"
 ARG XX_VERSION=1.1.2
@@ -192,7 +192,7 @@ RUN git init . && git remote add origin "https://github.com/containerd/container
 # When updating the binary version you may also need to update the vendor
 # version to pick up bug fixes or new APIs, however, usually the Go packages
 # are built from a commit from the master branch.
-ARG CONTAINERD_VERSION=v1.7.0-beta.4
+ARG CONTAINERD_VERSION=v1.7.0
 RUN git fetch -q --depth 1 origin "${CONTAINERD_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS containerd-build
@@ -237,7 +237,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
      && /build/gotestsum --version
 
 FROM base AS shfmt
-ARG SHFMT_VERSION=v3.0.2
+ARG SHFMT_VERSION=v3.6.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}" \

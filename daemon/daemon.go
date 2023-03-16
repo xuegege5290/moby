@@ -82,7 +82,7 @@ type Daemon struct {
 	configStore           *config.Config
 	statsCollector        *stats.Collector
 	defaultLogConfig      containertypes.LogConfig
-	registryService       registry.Service
+	registryService       *registry.Service
 	EventsService         *events.Events
 	netController         *libnetwork.Controller
 	volumes               *volumesservice.VolumesService
@@ -218,6 +218,11 @@ func (daemon *Daemon) RegistryHosts() docker.RegistryHosts {
 	return resolver.NewRegistryConfig(m)
 }
 
+// layerAccessor may be implemented by ImageService
+type layerAccessor interface {
+	GetLayerByID(cid string) (layer.RWLayer, error)
+}
+
 func (daemon *Daemon) restore() error {
 	var mapLock sync.Mutex
 	containers := make(map[string]*container.Container)
@@ -259,12 +264,14 @@ func (daemon *Daemon) restore() error {
 				log.Debugf("not restoring container because it was created with another storage driver (%s)", c.Driver)
 				return
 			}
-			rwlayer, err := daemon.imageService.GetLayerByID(c.ID)
-			if err != nil {
-				log.WithError(err).Error("failed to load container mount")
-				return
+			if accessor, ok := daemon.imageService.(layerAccessor); ok {
+				rwlayer, err := accessor.GetLayerByID(c.ID)
+				if err != nil {
+					log.WithError(err).Error("failed to load container mount")
+					return
+				}
+				c.RWLayer = rwlayer
 			}
-			c.RWLayer = rwlayer
 			log.WithFields(logrus.Fields{
 				"running": c.IsRunning(),
 				"paused":  c.IsPaused(),
@@ -1005,7 +1012,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		if err := configureKernelSecuritySupport(config, driverName); err != nil {
 			return nil, err
 		}
-		d.imageService = ctrd.NewService(d.containerdCli, driverName, d, d.registryService)
+		d.imageService = ctrd.NewService(d.containerdCli, d.containers, driverName, d, d.registryService)
 	} else {
 		layerStore, err := layer.NewStoreFromOptions(layer.StoreOptions{
 			Root:                      config.Root,
@@ -1450,6 +1457,11 @@ func (daemon *Daemon) IdentityMapping() idtools.IdentityMapping {
 // ImageService returns the Daemon's ImageService
 func (daemon *Daemon) ImageService() ImageService {
 	return daemon.imageService
+}
+
+// RegistryService returns the Daemon's RegistryService
+func (daemon *Daemon) RegistryService() *registry.Service {
+	return daemon.registryService
 }
 
 // BuilderBackend returns the backend used by builder
